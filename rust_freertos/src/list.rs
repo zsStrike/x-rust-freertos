@@ -18,8 +18,14 @@ impl fmt::Debug for ListItem {
 pub struct ListItem {
     /* The value being listed.  In most cases this is used to sort the list in descending order. */
     item_value: TickType,
-    /* Pointer to the next ListItem_t in the list. */
-    next: WeakItemLink,
+    /* Pointer to the next ListItem_t in the list.
+     * Previous design using WeakItemLink, this may 
+     * result in using after dereferenced problem:
+     * list.add(item1), list.add(item2) in build_list fn
+     * call traverse(&list) in main will produce the bug.
+     * the tests is in examples/test_list.rs
+     */
+    next: Option<ItemLink>,
     /* Pointer to the previous ListItem_t in the list. */
     prev: WeakItemLink,
     /* Pointer to the object (normally a TCB) that contains the list item.
@@ -32,8 +38,8 @@ pub struct ListItem {
 
 pub type ItemLink = Arc<RwLock<ListItem>>;
 pub type WeakItemLink = Weak<RwLock<ListItem>>;
-pub type WeakListLink = Weak<RwLock<List>>;
 pub type ListLink = Arc<RwLock<List>>;
+pub type WeakListLink = Weak<RwLock<List>>;
 
 impl Default for ListItem {
     fn default() -> Self {
@@ -72,8 +78,8 @@ impl ListItem {
             .upgrade()
             .unwrap_or_else(|| panic!("Container not set"));
         let ret_val = list.write().unwrap().remove_item(&self, link);
-        set_list_item_next(&self.prev, Weak::clone(&self.next));
-        set_list_item_prev(&self.next, Weak::clone(&self.prev));
+        set_list_item_next(&self.prev, Arc::downgrade(self.next.as_ref().unwrap()));
+        set_list_item_prev(&Arc::downgrade(self.next.as_ref().unwrap()), Weak::clone(&self.prev));
         self.container = Weak::new();
         ret_val
     }
@@ -93,6 +99,7 @@ pub struct List {
     /* List item that contains the maximum possible item value meaning
      * it is always at the end of the list and is therefore used as a marker. */
     list_end: ItemLink,
+    list_start: ItemLink
 }
 
 impl Default for List {
@@ -101,15 +108,17 @@ impl Default for List {
         end of the list.  To initialise the list the list end is inserted
         as the only list entry. */
         let list_end: ItemLink = Arc::new(RwLock::new(ListItem::default()));
+        let list_start: ItemLink = Arc::new(RwLock::new(ListItem::default()));
 
-        /* The list end next and previous pointers point to itself so we know
-        when the list is empty. */
-        list_end.write().unwrap().next = Arc::downgrade(&list_end);
-        list_end.write().unwrap().prev = Arc::downgrade(&list_end);
-
+        // /* The list end next and previous pointers point to itself so we know
+        // when the list is empty. */
+        list_start.write().unwrap().next = Some(Arc::clone(&list_end));
+        list_end.write().unwrap().prev = Arc::downgrade(&list_start);
+        
         List {
             index: Arc::downgrade(&list_end),
             list_end: list_end,
+            list_start: list_start,
             number_of_items: 0,
         }
     }
@@ -119,25 +128,25 @@ fn set_list_item_next(item: &WeakItemLink, next: WeakItemLink) {
     let owned_item = item
         .upgrade()
         .unwrap_or_else(|| panic!("List item is None"));
-    (*owned_item.write().unwrap()).next = next;
+    owned_item.write().unwrap().next = Some(next.upgrade().unwrap());
 }
 
 fn set_list_item_prev(item: &WeakItemLink, prev: WeakItemLink) {
     let owned_item = item
         .upgrade()
         .unwrap_or_else(|| panic!("List item is None"));
-    (*owned_item.write().unwrap()).prev = prev;
+    owned_item.write().unwrap().prev = prev;
 }
 
 fn get_list_item_next(item: &WeakItemLink) -> WeakItemLink {
     let owned_item = item
         .upgrade()
         .unwrap_or_else(|| panic!("List item is None"));
-    let next = Weak::clone(&(*owned_item.read().unwrap()).next);
+    let next = Arc::downgrade((owned_item.read().unwrap().next.as_ref().unwrap()));
     next
 }
 
-fn get_list_item_prev(item: &WeakItemLink) -> WeakItemLink {
+fn get_list_item_prev(item: &WeakItemLink) -> WeakItemLink {        
     let owned_item = item
         .upgrade()
         .unwrap_or_else(|| panic!("List item is None"));
@@ -405,6 +414,19 @@ pub fn list_remove(item_link: ItemLink) -> UBaseType {
         .remove(Arc::downgrade(&item_link))
 }
 
+pub fn traverse(list: &ListLink) {
+    let mut iter = Weak::clone(&list.read().unwrap().index);
+    list.write().unwrap().increment_index();
+    while !Weak::ptr_eq(&iter, &list.read().unwrap().index) {
+        if !Weak::ptr_eq(&Arc::downgrade(&list.read().unwrap().list_end), &list.read().unwrap().index) {
+            println!("item value = {}, ref_count = {}", 
+                get_weak_item_value(&list.read().unwrap().index),
+                Arc::strong_count(&list.read().unwrap().index.upgrade().unwrap()));
+        }
+        list.write().unwrap().increment_index();
+    }
+}
+
 impl List {
     fn insert(&mut self, item_link: WeakItemLink) {
         println!("in");
@@ -441,10 +463,18 @@ impl List {
               before the scheduler has been started (are interrupts firing
               before vTaskStartScheduler() has been called?).
             **********************************************************************/
-            let mut iterator = Arc::downgrade(&self.list_end);
+            // let mut iterator = Arc::downgrade(&self.list_end);
+            // loop {
+            //     /* There is nothing to do here, just iterating to the wanted
+            //     insertion position. */
+            //     let next = get_list_item_next(&iterator);
+            //     if get_weak_item_value(&next) > value_of_insertion {
+            //         break iterator;
+            //     }
+            //     iterator = next;
+            // }
+            let mut iterator = Arc::downgrade(&self.list_start);
             loop {
-                /* There is nothing to do here, just iterating to the wanted
-                insertion position. */
                 let next = get_list_item_next(&iterator);
                 if get_weak_item_value(&next) > value_of_insertion {
                     break iterator;
@@ -479,6 +509,9 @@ impl List {
         // TODO: Find a more effiecient
         if Weak::ptr_eq(&link, &self.index) {
             self.index = Weak::clone(&item.prev);
+            if Weak::ptr_eq(&Arc::downgrade(&self.list_start), &self.index) {
+                self.index = Weak::clone(&Arc::downgrade(&self.list_end));
+            }
         }
 
         self.number_of_items -= 1;
@@ -495,14 +528,29 @@ impl List {
     }
 
     fn increment_index(&mut self) {
-        self.index = get_list_item_next(&self.index);
         if Weak::ptr_eq(&self.index, &Arc::downgrade(&self.list_end)) {
+            self.index = get_list_item_next(&Arc::downgrade(&self.list_start));
+        } else {
             self.index = get_list_item_next(&self.index);
         }
     }
 
+    // fn decrease_index(&mut self) {
+    //     if Weak::ptr_eq(&self.index, &Arc::downgrade(&self.list_start)) {
+    //         self.index = get_list_item_prev(&Arc::downgrade(&self.list_end));
+    //     } else {
+    //         self.index = get_list_item_prev(&self.index);
+    //         if Weak::ptr_eq(&self.index, &Arc::downgrade(&self.list_start)) {
+    //             self.index = get_list_item_prev(&Arc::downgrade(&self.list_end));
+    //         }            
+    //     }
+    // }
+
     fn get_owner_of_next_entry(&mut self) -> Weak<RwLock<TCB>> {
         self.increment_index();
+        if Weak::ptr_eq(&self.index, &Arc::downgrade(&self.list_end)) {
+            self.index = get_list_item_next(&Arc::downgrade(&self.list_start));
+        }
         let owned_index = self
             .index
             .upgrade()
@@ -512,7 +560,7 @@ impl List {
     }
 
     fn get_owner_of_head_entry(&self) -> Weak<RwLock<TCB>> {
-        let list_end = get_list_item_next(&Arc::downgrade(&self.list_end));
+        let list_end = get_list_item_next(&Arc::downgrade(&self.list_start));
         let owned_index = list_end
             .upgrade()
             .unwrap_or_else(|| panic!("List item is None"));
@@ -521,60 +569,3 @@ impl List {
     }
 }
 
-/*
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_all() {
-        let list = Arc::new(RwLock::new(List::default()));
-        println!("List");
-
-        let t1 = TCB::new(3, &list).init();
-        let t2 = TCB::new(2, &list).init();
-
-        let x = get_owner_of_head_entry(&list);
-        println!("{:?}, should be 3", x);
-
-        let t3 = TCB::new(5, &list).init();
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 3", x);
-
-        let t4 = TCB::new(1, &list).init();
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 2", x);
-
-        let t5 = TCB::new(0, &list).init();
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 5", x);
-
-        let x = list_remove(Arc::clone(&t2.0.read().unwrap().item));
-        assert_eq!(x, 4);
-
-        let x = get_owner_of_head_entry(&list);
-        println!("{:?}, should be 1", x);
-
-        let item = Arc::clone(&t1.0.read().unwrap().item);
-        assert!(is_contained_within(&list, Arc::clone(&item)));
-        let x = list_remove(Arc::clone(&item));
-        // assert!(!is_contained_within(&list, Arc::clone(&item)));
-        assert_eq!(x, 3);
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 1", x);
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 0", x);
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 5", x);
-
-        let x = get_owner_of_next_entry(&list);
-        println!("{:?}, should be 1", x);
-    }
-}
-*/

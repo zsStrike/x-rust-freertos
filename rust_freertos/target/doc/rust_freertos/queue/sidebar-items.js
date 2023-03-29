@@ -1,1 +1,0 @@
-initSidebarItems({"constant":[["queueLOCKED_UNMODIFIED",""],["queueMUTEX_GIVE_BLOCK_TIME",""],["queueQUEUE_IS_MUTEX",""],["queueSEMAPHORE_QUEUE_ITEM_LENGTH",""],["queueUNLOCKED",""]],"struct":[["QueueDefinition",""]]});

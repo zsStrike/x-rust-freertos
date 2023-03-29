@@ -2,7 +2,7 @@
 name = "rust_freertos"
 version = "0.1.0"
 authors = ["Fandahao <fandahao17@mail.ustc.edu.cn>"]
-edition = "2018"
+#edition = "2018"
 
 [build-dependencies]
 bindgen = "0.42.2"

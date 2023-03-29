@@ -5,9 +5,10 @@ use crate::port::*;
 use crate::projdefs::FreeRtosError;
 use crate::task_global::*;
 use crate::*;
-use std::boxed::FnBox;
+// use std::boxed::FnBox;
 use std::mem;
 use std::sync::{Arc, RwLock, Weak};
+// pub type FnBox = std::ops::FnOnce;
 
 /* Task states returned by eTaskGetState. */
 #[derive(Copy, Clone, Debug)]
@@ -224,7 +225,7 @@ impl task_control_block {
         let mut top_of_stack = self.stack_pos + self.task_stacksize as StackType - 1;
         top_of_stack = top_of_stack & portBYTE_ALIGNMENT_MASK as StackType;
 
-        let f = Box::new(Box::new(func) as Box<FnBox()>); // Pass task function as a parameter.
+        let f = Box::new(Box::new(func) as Box<dyn FnOnce()>); // Pass task function as a parameter.
         let param_ptr = &*f as *const _ as *mut _; // Convert to raw pointer.
         trace!(
             "Function ptr of {} is at {:X}",
@@ -370,7 +371,7 @@ extern "C" fn run_wrapper(func_to_run: CVoidPointer) {
         func_to_run as u64
     );
     unsafe {
-        let func_to_run = Box::from_raw(func_to_run as *mut Box<FnBox() + 'static>);
+        let func_to_run = Box::from_raw(func_to_run as *mut Box<dyn FnOnce() + 'static>);
         func_to_run();
         // TODO: Delete this wrapper task.
     }
